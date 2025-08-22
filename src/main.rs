@@ -16,6 +16,7 @@ mod version;
 mod version_heuristics;
 mod zen;
 mod zen_asset_conversion;
+pub mod global;
 
 use anyhow::{Context, Result, bail};
 use bitflags::bitflags;
@@ -250,6 +251,11 @@ enum Action {
 struct Args {
     #[arg(short, long)]
     aes_key: Option<String>,
+
+    /// The game identifier: <GAME_ID>/Content/Paks (e.g., SB for Stellar Blade)
+    #[arg(short, long)]
+
+    game_id: Option<String>,
     #[arg(long)]
     override_container_header_version: Option<EIoContainerHeaderVersion>,
     #[arg(long)]
@@ -260,6 +266,7 @@ struct Args {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    get_game_id(args.game_id);
 
     let mut config = Config {
         container_header_version_override: args.override_container_header_version,
@@ -2563,6 +2570,7 @@ use crate::shader_library::{
 use crate::zen::FPackageFileVersion;
 use directory_index::*;
 use zen::get_package_name;
+use crate::global::get_game_id;
 
 mod directory_index {
     use typed_path::Utf8Component as _;

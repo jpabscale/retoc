@@ -15,6 +15,8 @@ use crate::{
     name_map::{FMappedName, FNameMap},
     ser::*,
 };
+use crate::global::get_game_id;
+use crate::global::FF7R2_GAME_ID;
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct FIoContainerHeader {
@@ -72,6 +74,10 @@ impl FIoContainerHeader {
         let mut new = Self::new(version, container_id);
 
         if version <= EIoContainerHeaderVersion::Initial {
+            let _unknown: u32 = match get_game_id(None).as_deref() {
+                Some(FF7R2_GAME_ID) => s.de()?,
+                _ => 0
+            };
             let names_buffer: Vec<u8> = s.de()?;
             let _name_hashes_buffer: Vec<u8> = s.de()?;
             let names = read_name_batch_parts(&names_buffer)?;
@@ -146,6 +152,14 @@ impl Writeable for FIoContainerHeader {
         }
 
         if self.version <= EIoContainerHeaderVersion::Initial {
+            match get_game_id(None).as_deref() {
+                Some(FF7R2_GAME_ID) => {
+                    s.ser(&0u32)?
+                },
+                _ => {
+
+                }
+            }
             // Serialize container local name map. This map is generally empty in legacy UE4 containers because there are no fields that write to it
             let (names_buffer, name_hashes_buffer) =
                 write_name_batch_parts(&self.redirect_name_map.copy_raw_names())?;
@@ -648,7 +662,14 @@ impl FFilePackageStoreEntry {
         }
         if version == EIoContainerHeaderVersion::Initial {
             s.ser(&self.load_order)?;
-            s.ser(&0u32)?;
+            match get_game_id(None).as_deref() {
+                Some(FF7R2_GAME_ID) => {
+                    s.ser(&-1i32)?;
+                },
+                _ => {
+                  s.ser(&0u32)?;
+                }
+            }
         }
         s.ser(&self.imported_packages)?;
         if version > EIoContainerHeaderVersion::Initial {
