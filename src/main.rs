@@ -867,7 +867,7 @@ fn action_to_legacy_assets(
     let prog_ref = progress.as_ref();
 
     let process = |(package_info, package_path): &(PackageInfo, String)| -> Result<()> {
-        verbose!(log, "{package_path}");
+        verbose!(log, "{}: {package_path}", package_info.container().container_path().as_os_str().to_str().unwrap());
 
         // TODO make configurable
         let path = package_path
