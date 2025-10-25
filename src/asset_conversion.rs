@@ -1,24 +1,27 @@
 use crate::container_header::EIoContainerHeaderVersion;
 use crate::iostore::IoStoreTrait;
-use crate::legacy_asset::{CLASS_CLASS_NAME, CORE_OBJECT_PACKAGE_NAME, FLegacyPackageFileSummary, FLegacyPackageHeader, FLegacyPackageVersioningInfo, FObjectDataResource, FObjectExport, FObjectImport, FPackageNameMap, FSerializedAssetBundle, OBJECT_CLASS_NAME, PACKAGE_CLASS_NAME, PRESTREAM_PACKAGE_CLASS_NAME, FCellImport, FCellExport};
+use crate::legacy_asset::{
+    CLASS_CLASS_NAME, CORE_OBJECT_PACKAGE_NAME, FCellExport, FCellImport, FLegacyPackageFileSummary, FLegacyPackageHeader, FLegacyPackageVersioningInfo, FObjectDataResource, FObjectExport, FObjectImport, FPackageNameMap, FSerializedAssetBundle, OBJECT_CLASS_NAME, PACKAGE_CLASS_NAME,
+    PRESTREAM_PACKAGE_CLASS_NAME,
+};
 use crate::logging::Log;
-use crate::logging::*;
 use crate::name_map::FMappedName;
 use crate::script_objects::{FPackageObjectIndex, FPackageObjectIndexType, FScriptObjectEntry, ZenScriptObjects};
 use crate::ser::{ReadExt, Utf8String, WriteExt};
+use crate::verse_vm_types::VPackage;
 use crate::zen::{EExportCommandType, EExportFilterFlags, EObjectFlags, FCellExportMapEntry, FExportMapEntry, FExternalDependencyArc, FInternalDependencyArc, FPackageFileVersion, FPackageIndex, FZenPackageHeader, FZenPackageVersioningInfo, ZenScriptCellsStore};
+use crate::zen_asset_conversion::get_cell_export_hash;
 use crate::{EIoChunkType, FGuid, FIoChunkId, FPackageId, FileWriterTrait, UEPath};
+use crate::{debug, info, verbose, warning};
 use anyhow::{anyhow, bail};
 use key_mutex::KeyMutex;
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Seek, SeekFrom, Write};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
-use crate::verse_vm_types::VPackage;
-use crate::zen_asset_conversion::get_cell_export_hash;
 
 // Cache that stores the packages that were retrieved for the purpose of dependency resolution, to avoid loading and parsing them multiple times
-pub(crate) struct FZenPackageContext<'a> {
+pub struct FZenPackageContext<'a> {
     store_access: &'a dyn IoStoreTrait,
     fallback_package_file_version: Option<FPackageFileVersion>,
     log: &'a Log,
@@ -42,7 +45,7 @@ struct FZenPackageContextScriptObjects {
     script_objects_resolved_as_classes: HashSet<FPackageObjectIndex>,
 }
 impl<'a> FZenPackageContext<'a> {
-    pub(crate) fn create(store_access: &'a dyn IoStoreTrait, fallback_package_file_version: Option<FPackageFileVersion>, log: &'a Log, script_cells: Option<Arc<ZenScriptCellsStore>>) -> Self {
+    pub fn create(store_access: &'a dyn IoStoreTrait, fallback_package_file_version: Option<FPackageFileVersion>, log: &'a Log, script_cells: Option<Arc<ZenScriptCellsStore>>) -> Self {
         Self {
             store_access,
             fallback_package_file_version,
@@ -197,9 +200,7 @@ impl<'a> FZenPackageContext<'a> {
                 result_verse_paths.extend(verse_package.definitions.iter().map(|x| x.name.0.clone()));
             }
         }
-        Ok(Arc::new(result_verse_paths.into_iter().map(|verse_path| {
-            (get_cell_export_hash(&verse_path), verse_path)
-        }).collect()))
+        Ok(Arc::new(result_verse_paths.into_iter().map(|verse_path| (get_cell_export_hash(&verse_path), verse_path)).collect()))
     }
     fn lookup_verse_cell_paths(&self, package_id: FPackageId) -> anyhow::Result<Arc<HashMap<u64, String>>> {
         if let Some(package) = self.try_lookup_verse_cell_paths(package_id)? {
@@ -498,10 +499,7 @@ fn begin_build_summary(builder: &mut LegacyAssetBuilder) -> anyhow::Result<()> {
             state_lock.has_logged_detected_package_version = true;
             info!(
                 builder.package_context.log,
-                "Detected package version: FPackageFileVersion(UE4: {}, UE5: {}), EZenPackageVersion: {}",
-                zen_versions.package_file_version.file_version_ue4,
-                zen_versions.package_file_version.file_version_ue5,
-                zen_versions.zen_version as u32
+                "Detected package version: FPackageFileVersion(UE4: {}, UE5: {}), EZenPackageVersion: {}", zen_versions.package_file_version.file_version_ue4, zen_versions.package_file_version.file_version_ue5, zen_versions.zen_version as u32
             );
         }
     }
@@ -611,7 +609,7 @@ fn find_or_add_resolved_import(builder: &mut LegacyAssetBuilder, import: &Resolv
 }
 
 fn resolve_verse_cell_import(builder: &mut LegacyAssetBuilder, cell_import_index: usize) -> anyhow::Result<()> {
-    let cell_import: FPackageObjectIndex = builder.zen_package.cell_import_map[cell_import_index].clone();
+    let cell_import: FPackageObjectIndex = builder.zen_package.cell_import_map[cell_import_index];
 
     let (package_name, verse_path) = if cell_import.kind() == FPackageObjectIndexType::ScriptImport {
         // Script import refers to a verse script cell that is imported from the native import store. Resolve it
@@ -628,7 +626,7 @@ fn resolve_verse_cell_import(builder: &mut LegacyAssetBuilder, cell_import_index
         }
     } else if cell_import.kind() == FPackageObjectIndexType::PackageImport {
         // This is an import of cell export from another package
-        resolve_cell_package_import(&builder.package_context, &builder.zen_package, cell_import)?
+        resolve_cell_package_import(builder.package_context, &builder.zen_package, cell_import)?
     } else {
         bail!("Verse cell import is not a Script Import or Package Import. Did not expect Null or Export package index in the verse cell import table");
     };
@@ -638,17 +636,17 @@ fn resolve_verse_cell_import(builder: &mut LegacyAssetBuilder, cell_import_index
         class_package: CORE_OBJECT_PACKAGE_NAME.to_string(),
         class_name: PACKAGE_CLASS_NAME.to_string(),
         outer: None,
-        object_name: package_name
+        object_name: package_name,
     };
     let package_import_index = find_or_add_resolved_import(builder, &package_zen_import);
 
     // We can add the cell import directly now that we know the package import index. Since cell import indices do not change by addition of package imports,
     // we do not have to deal with re-shuffling them to match the original import order later
-    builder.legacy_package.cell_imports.push(FCellImport{
+    builder.legacy_package.cell_imports.push(FCellImport {
         package_index: package_import_index,
         verse_path: Utf8String(verse_path),
     });
-    Ok({})
+    Ok(())
 }
 
 // Builds the import map entries for the legacy package. Returns true if some imports failed to resolve
@@ -706,13 +704,25 @@ fn build_import_map(builder: &mut LegacyAssetBuilder) -> anyhow::Result<()> {
         if cell_import_object_index.is_null() {
             // Hole in the cell import map is unexpected, but could be produced by retoc if conversion to legacy asset was not successful for the import
             warning!(builder.package_context.log, "Unexpected null object index in cell import map at index {} for package {}", cell_import_index, builder.zen_package.package_name());
-            builder.legacy_package.cell_imports.push(FCellImport{package_index: FPackageIndex::create_import(0), verse_path: Utf8String::default()});
+            builder.legacy_package.cell_imports.push(FCellImport {
+                package_index: FPackageIndex::create_import(0),
+                verse_path: Utf8String::default(),
+            });
         } else if let Err(cell_import_resolve_error) = resolve_verse_cell_import(builder, cell_import_index) {
             if !cell_import_resolve_error.to_string().contains("failed to resolve verse paths previously") {
-                warning!(builder.package_context.log, "Failed to resolve cell import map object {} (index {}) for package {}: {}",
-                    cell_import_object_index, cell_import_index, builder.zen_package.package_name(), cell_import_resolve_error);
+                warning!(
+                    builder.package_context.log,
+                    "Failed to resolve cell import map object {} (index {}) for package {}: {}",
+                    cell_import_object_index,
+                    cell_import_index,
+                    builder.zen_package.package_name(),
+                    cell_import_resolve_error
+                );
             }
-            builder.legacy_package.cell_imports.push(FCellImport{package_index: FPackageIndex::create_import(0), verse_path: Utf8String::default()});
+            builder.legacy_package.cell_imports.push(FCellImport {
+                package_index: FPackageIndex::create_import(0),
+                verse_path: Utf8String::default(),
+            });
         }
     }
     Ok(())
@@ -816,17 +826,28 @@ fn build_export_map(builder: &mut LegacyAssetBuilder) -> anyhow::Result<()> {
             let cpp_class_info = builder.legacy_package.name_map.store(&cpp_class_info_string);
 
             let verse_path = if zen_cell_export.public_export_hash != 0 {
-                Utf8String(verse_path_lookup.get(&zen_cell_export.public_export_hash)
-                    .ok_or_else(|| anyhow!("Failed to resolve verse path for export {} of package {}", cell_export_index, builder.zen_package.package_name()))?.clone())
-            } else { Utf8String::default() };
+                Utf8String(
+                    verse_path_lookup
+                        .get(&zen_cell_export.public_export_hash)
+                        .ok_or_else(|| anyhow!("Failed to resolve verse path for export {} of package {}", cell_export_index, builder.zen_package.package_name()))?
+                        .clone(),
+                )
+            } else {
+                Utf8String::default()
+            };
 
             let serial_offset = zen_cell_export.cooked_serial_offset as i64;
             let serial_layout_size = zen_cell_export.cooked_serial_layout_size as i64;
             let serial_size = zen_cell_export.cooked_serial_size as i64;
 
-            builder.legacy_package.cell_exports.push(FCellExport{
-                cpp_class_info, verse_path, serial_offset, serial_layout_size, serial_size,
-                first_export_dependency_index: -1, ..FCellExport::default()
+            builder.legacy_package.cell_exports.push(FCellExport {
+                cpp_class_info,
+                verse_path,
+                serial_offset,
+                serial_layout_size,
+                serial_size,
+                first_export_dependency_index: -1,
+                ..FCellExport::default()
             });
         }
     }
@@ -1461,7 +1482,7 @@ fn write_asset(builder: &LegacyAssetBuilder, out_asset_path: &UEPath, file_write
     Ok(())
 }
 
-pub(crate) fn build_legacy(package_context: &FZenPackageContext, package_id: FPackageId, out_path: &UEPath, file_writer: &dyn FileWriterTrait) -> anyhow::Result<()> {
+pub fn build_legacy(package_context: &FZenPackageContext, package_id: FPackageId, out_path: &UEPath, file_writer: &dyn FileWriterTrait) -> anyhow::Result<()> {
     // Build the asset from zen
     let asset_builder = build_asset_from_zen(package_context, package_id)?;
     // Write the asset to the file

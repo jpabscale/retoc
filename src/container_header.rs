@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::io::Seek;
 use std::{
     collections::BTreeMap,
     io::{Cursor, Read, SeekFrom, Write},
     marker::PhantomData,
 };
-use std::io::Seek;
 use strum::FromRepr;
 use tracing::instrument;
 
@@ -20,9 +20,9 @@ use crate::global::get_game_id;
 use crate::global::FF7R2_GAME_ID;
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
-pub(crate) struct FIoContainerHeader {
-    pub(crate) version: EIoContainerHeaderVersion,
-    pub(crate) container_id: FIoContainerId,
+pub struct FIoContainerHeader {
+    pub version: EIoContainerHeaderVersion,
+    pub container_id: FIoContainerId,
     packages: StoreEntries,
     optional_segment_package_ids: Vec<FPackageId>,
     optional_segment_store_entries: Vec<u8>,
@@ -45,7 +45,7 @@ impl Readable for FIoContainerHeader {
 }
 impl FIoContainerHeader {
     #[instrument(skip_all, name = "FIoContainerHeader")]
-    pub(crate) fn deserialize<S: Read>(s: &mut S, version_override: Option<EIoContainerHeaderVersion>) -> Result<Self> {
+    pub fn deserialize<S: Read>(s: &mut S, version_override: Option<EIoContainerHeaderVersion>) -> Result<Self> {
         let signature: u32 = s.de()?;
         let version: EIoContainerHeaderVersion;
         let container_id;
@@ -132,7 +132,7 @@ impl FIoContainerHeader {
 
         Ok(new)
     }
-    pub(crate) fn serialize<S: Write + Seek>(&self, s: &mut S) -> Result<()> {
+    pub fn serialize<S: Write + Seek>(&self, s: &mut S) -> Result<()> {
         if self.version > EIoContainerHeaderVersion::Initial {
             s.ser(&Self::MAGIC)?;
             s.ser(&self.version)?;
@@ -205,7 +205,7 @@ impl FIoContainerHeader {
 impl FIoContainerHeader {
     const MAGIC: u32 = 0x496f436e;
 
-    pub(crate) fn new(version: EIoContainerHeaderVersion, container_id: FIoContainerId) -> Self {
+    pub fn new(version: EIoContainerHeaderVersion, container_id: FIoContainerId) -> Self {
         Self {
             version,
             container_id,
@@ -223,11 +223,11 @@ impl FIoContainerHeader {
         }
     }
 
-    pub(crate) fn add_package(&mut self, package_id: FPackageId, store_entry: StoreEntry) {
+    pub fn add_package(&mut self, package_id: FPackageId, store_entry: StoreEntry) {
         self.packages.0.insert(package_id, store_entry);
     }
 
-    pub(crate) fn add_localized_package(&mut self, package_culture: &str, source_package_name: &str, localized_package_id: FPackageId) -> Result<()> {
+    pub fn add_localized_package(&mut self, package_culture: &str, source_package_name: &str, localized_package_id: FPackageId) -> Result<()> {
         let source_package_id = FPackageId::from_name(source_package_name);
 
         // New style localized packages do not track the localized package IDs, they only track the list of packages that are localized. Actual Package IDs for localized packages
@@ -251,7 +251,7 @@ impl FIoContainerHeader {
         Ok(())
     }
 
-    pub(crate) fn add_package_redirect(&mut self, source_package_name: &str, redirect_package_id: FPackageId) -> Result<()> {
+    pub fn add_package_redirect(&mut self, source_package_name: &str, redirect_package_id: FPackageId) -> Result<()> {
         let source_package_id = FPackageId::from_name(source_package_name);
 
         // New style redirects track the package name as well as it's package ID
@@ -275,14 +275,14 @@ impl FIoContainerHeader {
         Ok(())
     }
 
-    pub(crate) fn lookup_package_redirect(&self, source_package_id: FPackageId) -> Option<FPackageId> {
+    pub fn lookup_package_redirect(&self, source_package_id: FPackageId) -> Option<FPackageId> {
         self.package_redirect_lookup.get(&source_package_id).cloned()
     }
 
-    pub(crate) fn get_store_entry(&self, package_id: FPackageId) -> Option<StoreEntry> {
+    pub fn get_store_entry(&self, package_id: FPackageId) -> Option<StoreEntry> {
         self.packages.get(package_id)
     }
-    pub(crate) fn package_ids(&self) -> std::iter::Copied<std::collections::btree_map::Keys<'_, FPackageId, StoreEntry>> {
+    pub fn package_ids(&self) -> std::iter::Copied<std::collections::btree_map::Keys<'_, FPackageId, StoreEntry>> {
         self.packages.0.keys().copied()
     }
 }
@@ -290,7 +290,7 @@ impl FIoContainerHeader {
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, FromRepr, clap::ValueEnum, Serialize, Deserialize)]
 #[repr(i32)]
 #[clap(rename_all = "verbatim")]
-pub(crate) enum EIoContainerHeaderVersion {
+pub enum EIoContainerHeaderVersion {
     PreInitial = -1,
     Initial = 0,
     LocalizedPackages = 1,
@@ -419,17 +419,17 @@ impl Writeable for LegacyContainerHeaderPackageRedirect {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct StoreEntry {
+pub struct StoreEntry {
     // version == EIoContainerHeaderVersion::NoExportInfo
-    pub(crate) export_bundles_size: u64,
-    pub(crate) load_order: u32,
+    pub export_bundles_size: u64,
+    pub load_order: u32,
 
     // version < EIoContainerHeaderVersion::NoExportInfo
-    pub(crate) export_count: i32,
-    pub(crate) export_bundle_count: i32,
+    pub export_count: i32,
+    pub export_bundle_count: i32,
 
-    pub(crate) imported_packages: Vec<FPackageId>,
-    pub(crate) shader_map_hashes: Vec<FSHAHash>,
+    pub imported_packages: Vec<FPackageId>,
+    pub shader_map_hashes: Vec<FSHAHash>,
 }
 
 #[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
