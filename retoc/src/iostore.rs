@@ -59,6 +59,35 @@ pub fn open<P: AsRef<Path>>(path: P, config: Arc<Config>) -> Result<Box<dyn IoSt
     Ok(if path.as_ref().is_dir() { Box::new(IoStoreBackend::open(path, config)?) } else { Box::new(IoStoreContainer::open(path, config)?) })
 }
 
+/// Opens a list of container paths in the order provided. Each path may be an
+/// individual `.utoc` or a directory containing `.utoc` files.
+pub fn open_with_container_paths(paths: &[PathBuf], config: Arc<Config>) -> Result<Box<dyn IoStoreTrait>> {
+    let container_paths = paths.iter().map(collect_container_paths).collect::<Result<Vec<_>>>()?.into_iter().flatten().collect();
+    Ok(Box::new(IoStoreBackend::open_paths(container_paths, config)?))
+}
+
+fn collect_container_paths<P: AsRef<Path>>(path: P) -> Result<Vec<PathBuf>> {
+    let path = path.as_ref();
+    if path.is_dir() {
+        let mut paths = Vec::new();
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            let entry_path = entry.path();
+            if entry_path.extension() == Some(OsStr::new("utoc")) {
+                paths.push(entry_path);
+            }
+        }
+        paths.sort_by(|a, b| {
+            let a_name = a.file_stem().and_then(|x| x.to_str()).unwrap_or_default();
+            let b_name = b.file_stem().and_then(|x| x.to_str()).unwrap_or_default();
+            sort_container_name(b_name).cmp(&sort_container_name(a_name))
+        });
+        Ok(paths)
+    } else {
+        Ok(vec![path.to_path_buf()])
+    }
+}
+
 /// Return an object that can be sorted by to achieve container priority.
 /// Higher priority should Cmp higher
 fn sort_container_name(full_name: &str) -> (bool, u32, &str) {
@@ -187,14 +216,11 @@ impl IoStoreBackend {
         Ok(Self { containers: vec![] })
     }
     pub fn open<P: AsRef<Path>>(dir: P, config: Arc<Config>) -> Result<Self> {
-        let mut containers: Vec<Box<dyn IoStoreTrait>> = vec![];
-        for entry in fs::read_dir(dir.as_ref())? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension() == Some(OsStr::new("utoc")) {
-                containers.push(Box::new(IoStoreContainer::open(path, config.clone())?));
-            }
-        }
+        Self::open_paths(collect_container_paths(dir)?, config)
+    }
+
+    fn open_paths(container_paths: Vec<PathBuf>, config: Arc<Config>) -> Result<Self> {
+        let containers: Vec<Box<dyn IoStoreTrait>> = container_paths.into_iter().map(|path| IoStoreContainer::open(path, config.clone()).map(|container| Box::new(container) as Box<dyn IoStoreTrait>)).collect::<Result<_>>()?;
         // Validate that all containers are of the same version
         let mut previous_container_version: Option<EIoStoreTocVersion> = None;
         let mut previous_container_name: String = String::new();
@@ -238,7 +264,6 @@ impl IoStoreBackend {
             }
         }
 
-        containers.sort_by(|a, b| sort_container_name(b.container_name()).cmp(&sort_container_name(a.container_name())));
         Ok(Self { containers })
     }
 }

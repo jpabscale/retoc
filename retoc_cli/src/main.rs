@@ -106,9 +106,9 @@ struct ActionPackRaw {
 
 #[derive(Parser, Debug)]
 struct ActionToLegacy {
-    /// Input .utoc or directory with multiple .utoc (e.g. Content/Paks/)
-    #[arg(index = 1)]
-    input: PathBuf,
+    /// Input .utoc, directory with multiple .utoc, or OS-native path-separated list of either
+    #[arg(index = 1, value_name = "INPUTS")]
+    input: String,
     /// Output directory or .pak
     #[arg(index = 2)]
     output: PathBuf,
@@ -670,7 +670,8 @@ fn action_to_legacy(args: ActionToLegacy, config: Arc<Config>) -> Result<()> {
 }
 
 fn action_to_legacy_inner(args: ActionToLegacy, config: Arc<Config>, file_writer: &dyn FileWriterTrait, log: &Log) -> Result<()> {
-    let iostore = iostore::open(&args.input, config.clone())?;
+    let input_paths = std::env::split_paths(OsStr::new(&args.input)).collect::<Vec<_>>();
+    let iostore = iostore::open_with_container_paths(&input_paths, config.clone())?;
     if !args.no_assets {
         action_to_legacy_assets(&args, file_writer, &*iostore, log)?;
     }
@@ -692,11 +693,18 @@ fn progress_style() -> indicatif::ProgressStyle {
 
 fn action_to_legacy_assets(args: &ActionToLegacy, file_writer: &dyn FileWriterTrait, iostore: &dyn IoStoreTrait, log: &Log) -> Result<()> {
     let mut packages_to_extract = vec![];
+    let mut selected_package_ids: HashSet<FPackageId> = HashSet::default();
     for package_info in iostore.packages() {
         let chunk_id = FIoChunkId::from_package_id(package_info.id(), 0, EIoChunkType::ExportBundleData);
         let package_path = iostore.chunk_path(chunk_id).with_context(|| format!("{:?} has no path name entry. Cannot extract", package_info.id()))?;
 
         if !args.filter.is_empty() && !args.filter.iter().any(|f| package_path.contains(f)) {
+            continue;
+        }
+
+        // Apply the filter before claiming the package ID. This lets a later
+        // input provide the candidate when an earlier candidate is excluded.
+        if !selected_package_ids.insert(package_info.id()) {
             continue;
         }
 

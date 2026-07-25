@@ -41,6 +41,11 @@ Overrides may be required to extract content from certain games (usually pre-5.0
 
 ### to-legacy
 ```console
+$ retoc to-legacy [OPTIONS] <INPUTS> <OUTPUT>
+# INPUTS is an OS-native path-separated list of .utoc files or directories.
+# Use ':' between paths on Unix and ';' between paths on Windows.
+# Earlier inputs have priority; later inputs provide fallback packages.
+
 $ ls AbioticFactor/Content/Paks
 global.ucas
 global.utoc
@@ -55,6 +60,10 @@ Extracted 22522 (0 failed) legacy assets to "legacy_P.pak"
 Shader Library ShaderArchive-Global-PCD3D_SM5-PCD3D_SM5 statistics: Shared Shaders: 10; Unique Shaders: 4324; Detached Shaders: 0; Shader Maps: 339 (referenced by 0 packages), Uncompressed Size: 68MB, Compressed Size: 15MB, Compression Ratio: 445%
 Shader Library ShaderArchive-AbioticFactor_Chunk0-PCD3D_SM5-PCD3D_SM5 statistics: Shared Shaders: 1941; Unique Shaders: 12327; Detached Shaders: 0; Shader Maps: 819 (referenced by 1721 packages), Uncompressed Size: 138MB, Compressed Size: 43MB, Compression Ratio: 322%
 Extracted 2 shader code libraries to "legacy_P.pak"
+
+# List containers in priority order. Use ':' between paths on Unix and ';' between paths on Windows.
+# Missing packages fall back to later containers in the list.
+$ retoc to-legacy mods/Content/Paks:mods/Extra:game/Content/Paks legacy
 ```
 
 ### to-zen
