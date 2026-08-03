@@ -5,7 +5,7 @@ use fs_err as fs;
 use rayon::prelude::*;
 use retoc::asset_conversion::{self, FZenPackageContext};
 use retoc::container_header::EIoContainerHeaderVersion;
-use retoc::iostore::{IoStoreTrait, PackageInfo};
+use retoc::iostore::{ChunkInfo, IoStoreTrait, PackageInfo};
 use retoc::iostore_writer::IoStoreWriter;
 use retoc::legacy_asset::FSerializedAssetBundle;
 use retoc::logging::Log;
@@ -80,10 +80,21 @@ struct ActionVerify {
 
 #[derive(Parser, Debug)]
 struct ActionUnpack {
-    #[arg(index = 1)]
-    utoc: PathBuf,
+    /// Input .utoc or directory with multiple .utoc (e.g. Content/Paks/)
+    #[arg(index = 1, value_name = "INPUTS")]
+    input: String,
+    /// Output directory
     #[arg(index = 2)]
     output: PathBuf,
+
+    /// Asset file name filter
+    #[arg(short, long)]
+    filter: Vec<String>,
+
+    /// Do not run in parallel. Useful for debugging
+    #[arg(long)]
+    no_parallel: bool,
+
     #[arg(short, long, default_value = "false")]
     verbose: bool,
 }
@@ -513,32 +524,40 @@ fn action_verify(args: ActionVerify, config: Arc<Config>) -> Result<()> {
 }
 
 fn action_unpack(args: ActionUnpack, config: Arc<Config>) -> Result<()> {
-    let mut stream = BufReader::new(fs::File::open(&args.utoc)?);
-    let ucas = &args.utoc.with_extension("ucas");
-
-    let toc: Toc = stream.de_ctx(config)?;
+    let input_paths = std::env::split_paths(OsStr::new(&args.input)).collect::<Vec<_>>();
+    let iostore = iostore::open_with_container_paths(&input_paths, config)?;
 
     let output = args.output;
+    let chunks: Vec<_> = iostore.chunks().collect();
 
-    // TODO extract entries not found in directory index
-    // TODO output chunk id manifest
-    toc.file_map.keys().par_bridge().try_for_each_init(
-        || BufReader::new(fs::File::open(ucas).unwrap()),
-        |ucas, file_name| -> Result<()> {
-            if args.verbose {
-                println!("{file_name}");
-            }
-            let data = toc.read(ucas, toc.file_map[file_name])?;
+    let process = |chunk: &ChunkInfo| -> Result<()> {
+        let Some(path) = chunk.path() else {
+            return Ok(());
+        };
+        if !args.filter.is_empty() && !args.filter.iter().any(|f| path.contains(f)) {
+            return Ok(());
+        }
+        if args.verbose {
+            println!("{path}");
+        }
+        // Strip leading mount point components (../../../SB/... -> SB/...) so the
+        // output tree matches repak's shape and automod's relPath expectations.
+        let relative_path = path.trim_start_matches("../");
+        let data = chunk.read()?;
+        let path = output.join(relative_path);
+        let dir = path.parent().unwrap();
+        fs::create_dir_all(dir)?;
+        fs::write(path, &data)?;
+        Ok(())
+    };
 
-            let path = output.join(file_name);
-            let dir = path.parent().unwrap();
-            fs::create_dir_all(dir)?;
-            fs::write(path, &data)?;
-            Ok(())
-        },
-    )?;
+    if args.no_parallel {
+        chunks.iter().try_for_each(process)?;
+    } else {
+        chunks.par_iter().try_for_each(process)?;
+    }
 
-    println!("unpacked {} files to {}", toc.file_map.len(), output.to_string_lossy());
+    println!("unpacked {} files to {}", chunks.len(), output.to_string_lossy());
 
     Ok(())
 }
@@ -946,6 +965,37 @@ fn action_to_zen(args: ActionToZen, config: Arc<Config>) -> Result<()> {
 
     prog_ref.inspect(|p| p.finish_with_message(""));
     log.set_progress(None);
+
+    // Pass through any remaining plain files as external chunks so they land in
+    // the mod container untouched (e.g. raw files patched by automod). The
+    // ExternalFile chunk type only exists in the UE5+ container format; for
+    // older formats (UE4 zen, e.g. Stellar Blade) fall back to BulkData, which
+    // is the generic raw-data chunk type that is valid there.
+    let passthrough_chunk_type = if toc_version > EIoStoreTocVersion::PerfectHash {
+        EIoChunkType::ExternalFile
+    } else {
+        EIoChunkType::BulkData
+    };
+    let mut external_chunk_index = 0u16;
+    for path in &files {
+        let ue_path = UEPath::new(&path);
+        let ext = ue_path.extension();
+        let file_name = ue_path.file_name().unwrap_or_default();
+
+        let is_converted_content = [Some("uasset"), Some("umap"), Some("uexp"), Some("ubulk"), Some("uptnl"), Some("m.ubulk"), Some("ushaderbytecode")].contains(&ext)
+            || (file_name.starts_with("ShaderAssetInfo-") && ext == Some("assetinfo.json"))
+            || file_name == "scriptobjects.bin";
+
+        if is_converted_content || !check_path(path) {
+            continue;
+        }
+
+        verbose!(&log, "passing through {path}");
+        let data = input.read(path)?;
+        let chunk_id = FIoChunkId::create(external_chunk_index as u64, 0, passthrough_chunk_type);
+        external_chunk_index = external_chunk_index.wrapping_add(1);
+        writer.write_chunk(chunk_id, Some(&mount_point.join(path)), &data)?;
+    }
 
     writer.finalize()?;
 

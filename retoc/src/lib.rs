@@ -1235,7 +1235,7 @@ pub struct FIoStoreTocChunkInfo {
     is_compressed: bool,
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, FromRepr, AsRefStr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, FromRepr, AsRefStr)]
 #[repr(u8)]
 pub enum EIoChunkType {
     Invalid,
