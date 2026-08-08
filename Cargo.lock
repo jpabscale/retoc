@@ -1220,7 +1220,7 @@ dependencies = [
 
 [[package]]
 name = "retoc"
-version = "0.1.6-pre.3"
+version = "0.1.6-pre.4"
 dependencies = [
  "aes",
  "anyhow",
@@ -1257,7 +1257,7 @@ dependencies = [
 
 [[package]]
 name = "retoc_cli"
-version = "0.1.6-pre.3"
+version = "0.1.6-pre.4"
 dependencies = [
  "anyhow",
  "blake3",

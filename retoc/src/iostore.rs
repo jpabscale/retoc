@@ -130,13 +130,42 @@ pub trait IoStoreTrait: Send + Sync {
     fn lookup_package_redirect(&self, source_package_id: FPackageId) -> Option<FPackageId>;
 
     fn load_script_objects(&self) -> Result<ZenScriptObjects> {
-        if self.container_file_version().unwrap() > EIoStoreTocVersion::PerfectHash {
-            let script_objects_data = self.read(FIoChunkId::create(0, 0, EIoChunkType::ScriptObjects))?;
-            ZenScriptObjects::deserialize_new(&mut Cursor::new(script_objects_data))
+        let new_id = FIoChunkId::create(0, 0, EIoChunkType::ScriptObjects);
+        let meta_id = FIoChunkId::create(0, 0, EIoChunkType::LoaderInitialLoadMeta);
+        let names_id = FIoChunkId::create(0, 0, EIoChunkType::LoaderGlobalNames);
+
+        // ScriptObjects (UE5) and the Loader* chunks (UE4) are era-specific: a chunk id
+        // can only be version-stamped against a container of the matching era, and the
+        // composite's first-container stamp is wrong when containers mix eras (e.g. a
+        // DirectoryIndex mod mounted over a PartitionSize game, where script objects
+        // live in `global`). Try each child in priority order, version-guarding the
+        // probe so we never stamp an era-specific chunk id with the wrong era's version.
+        for container in self.child_containers() {
+            let Some(version) = container.container_file_version() else { continue };
+            if version > EIoStoreTocVersion::PerfectHash {
+                if container.has_chunk_id(new_id) {
+                    let data = container.read(new_id)?;
+                    return ZenScriptObjects::deserialize_new(&mut Cursor::new(data));
+                }
+            } else if container.has_chunk_id(meta_id) {
+                let data = container.read(meta_id)?;
+                let names = container.read(names_id)?;
+                return ZenScriptObjects::deserialize_old(&mut Cursor::new(data), &names);
+            }
+        }
+
+        // Single container (no children): the container itself provides script objects,
+        // and its own version is the correct era for stamping.
+        let is_new = self
+            .container_file_version()
+            .is_some_and(|v| v > EIoStoreTocVersion::PerfectHash);
+        if is_new {
+            let data = self.read(new_id)?;
+            ZenScriptObjects::deserialize_new(&mut Cursor::new(data))
         } else {
-            let script_objects_data = self.read(FIoChunkId::create(0, 0, EIoChunkType::LoaderInitialLoadMeta))?;
-            let names = self.read(FIoChunkId::create(0, 0, EIoChunkType::LoaderGlobalNames))?;
-            ZenScriptObjects::deserialize_old(&mut Cursor::new(script_objects_data), &names)
+            let data = self.read(meta_id)?;
+            let names = self.read(names_id)?;
+            ZenScriptObjects::deserialize_old(&mut Cursor::new(data), &names)
         }
     }
 }
@@ -221,7 +250,13 @@ impl IoStoreBackend {
 
     fn open_paths(container_paths: Vec<PathBuf>, config: Arc<Config>) -> Result<Self> {
         let containers: Vec<Box<dyn IoStoreTrait>> = container_paths.into_iter().map(|path| IoStoreContainer::open(path, config.clone()).map(|container| Box::new(container) as Box<dyn IoStoreTrait>)).collect::<Result<_>>()?;
-        // Validate that all containers are of the same version
+        // Mixing containers of different TOC versions is safe: every IoStoreContainer
+        // re-stamps chunk IDs with its own `self.toc.version` on lookup (read/has_chunk_id),
+        // so resolution is per-container regardless of the composite's stamp. This is needed
+        // to mount e.g. a DirectoryIndex mod container over a PartitionSize base game. It is
+        // permitted only when the caller explicitly overrides the TOC version; otherwise the
+        // strict uniform-version check stays so unexpected mismatches surface as errors.
+        let allow_mixed = config.toc_version_override.is_some();
         let mut previous_container_version: Option<EIoStoreTocVersion> = None;
         let mut previous_container_name: String = String::new();
         let mut previous_header_container_version: Option<EIoContainerHeaderVersion> = None;
@@ -237,13 +272,23 @@ impl IoStoreBackend {
                 previous_container_version = Some(this_container_version);
             }
             if this_container_version != previous_container_version.unwrap() {
-                bail!(
-                    "Cannot create composite container for containers of different versions: Container {} and {} have different versions {:?} and {:?}",
-                    previous_container_name,
-                    this_container_name,
-                    previous_container_version.unwrap(),
-                    this_container_version
-                );
+                if allow_mixed {
+                    eprintln!(
+                        "warning: composite container mixes TOC versions: Container {} and {} have different versions {:?} and {:?}",
+                        previous_container_name,
+                        this_container_name,
+                        previous_container_version.unwrap(),
+                        this_container_version
+                    );
+                } else {
+                    bail!(
+                        "Cannot create composite container for containers of different versions: Container {} and {} have different versions {:?} and {:?}. Use --override-toc-version to allow mixing.",
+                        previous_container_name,
+                        this_container_name,
+                        previous_container_version.unwrap(),
+                        this_container_version
+                    );
+                }
             }
 
             // Check that container header version matches the previous container
@@ -253,13 +298,23 @@ impl IoStoreBackend {
                     previous_header_container_version = Some(this_container_header_version);
                 }
                 if this_container_header_version != previous_header_container_version.unwrap() {
-                    bail!(
-                        "Cannot create composite container for containers of different header versions: Container {} and {} have different versions {:?} and {:?}",
-                        previous_header_container_name,
-                        this_container_name,
-                        previous_header_container_version.unwrap(),
-                        this_container_header_version
-                    );
+                    if allow_mixed {
+                        eprintln!(
+                            "warning: composite container mixes header versions: Container {} and {} have different versions {:?} and {:?}",
+                            previous_header_container_name,
+                            this_container_name,
+                            previous_header_container_version.unwrap(),
+                            this_container_header_version
+                        );
+                    } else {
+                        bail!(
+                            "Cannot create composite container for containers of different header versions: Container {} and {} have different versions {:?} and {:?}. Use --override-toc-version to allow mixing.",
+                            previous_header_container_name,
+                            this_container_name,
+                            previous_header_container_version.unwrap(),
+                            this_container_header_version
+                        );
+                    }
                 }
             }
         }
