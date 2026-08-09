@@ -743,7 +743,7 @@ fn action_to_legacy_assets(args: &ActionToLegacy, file_writer: &dyn FileWriterTr
     let prog_ref = progress.as_ref();
 
     let process = |(package_info, package_path): &(PackageInfo, String)| -> Result<()> {
-        verbose!(log, "{package_path}");
+        verbose!(log, "{} [from {}]", package_path, package_info.container().name());
 
         // TODO make configurable
         let path = package_path.strip_prefix("../../../").with_context(|| format!("failed to strip mount prefix from {package_path}"))?;

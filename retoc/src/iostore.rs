@@ -431,6 +431,9 @@ impl IoStoreContainer {
     pub fn container_path(&self) -> &Path {
         self.path.as_ref()
     }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
 }
 impl IoStoreTrait for IoStoreContainer {
     fn container_name(&self) -> &str {
