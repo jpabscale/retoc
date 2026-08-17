@@ -1260,28 +1260,42 @@ fn create_unknown_object_import_map_entry(builder: &mut LegacyAssetBuilder, oute
     }
 }
 
+fn place_import_positions(import_count: usize, original_import_order: &HashMap<usize, usize>, import_map_size: usize) -> (HashMap<usize, usize>, Vec<Option<usize>>) {
+    let predefined_positions: HashSet<usize> = original_import_order.values().copied().collect();
+    let mut current_import_index = 0;
+    let mut placed_positions = HashSet::with_capacity(original_import_order.len());
+    let mut remap = HashMap::with_capacity(import_map_size);
+    let mut positions = Vec::with_capacity(import_map_size);
+
+    for final_import_index in 0..import_map_size {
+        if let Some(&existing_import_position) = original_import_order.get(&final_import_index)
+            && placed_positions.insert(existing_import_position)
+        {
+            remap.insert(existing_import_position, final_import_index);
+            positions.push(Some(existing_import_position));
+            continue;
+        }
+        while predefined_positions.contains(&current_import_index) {
+            current_import_index += 1;
+        }
+        if current_import_index >= import_count {
+            positions.push(None);
+            continue;
+        }
+        remap.insert(current_import_index, final_import_index);
+        positions.push(Some(current_import_index));
+        current_import_index += 1;
+    }
+    (remap, positions)
+}
+
 fn finalize_asset(builder: &mut LegacyAssetBuilder) -> anyhow::Result<()> {
     // Remap import map to the current indices
     let import_map_size = max(builder.legacy_package.imports.len(), builder.zen_package.import_map.len());
-    let mut import_remap_map: HashMap<usize, usize> = HashMap::with_capacity(import_map_size);
+    let (import_remap_map, import_positions) = place_import_positions(builder.legacy_package.imports.len(), &builder.original_import_order, import_map_size);
     let mut new_import_map: Vec<FObjectImport> = Vec::with_capacity(import_map_size);
-
-    let current_import_indices_with_predefined_positions: HashSet<usize> = builder.original_import_order.values().copied().collect();
-    let mut current_legacy_asset_import_index: usize = 0;
-
-    for final_import_index in 0..import_map_size {
-        // If there is an original import to put in this position, use it
-        if let Some(existing_import_position) = builder.original_import_order.get(&final_import_index) {
-            import_remap_map.insert(*existing_import_position, final_import_index);
-            new_import_map.push(builder.legacy_package.imports[*existing_import_position].clone());
-            continue;
-        }
-        // Skip over the current imports that have predefined positions
-        while current_import_indices_with_predefined_positions.contains(&current_legacy_asset_import_index) {
-            current_legacy_asset_import_index += 1;
-        }
-        // We should never end up with fewer imports than we have to fill the holes, since zen never strips non-upackage exports
-        if current_legacy_asset_import_index >= builder.legacy_package.imports.len() {
+    for (final_import_index, existing_import_position) in import_positions.into_iter().enumerate() {
+        let Some(existing_import_position) = existing_import_position else {
             // Attempt to handle this case gracefully by emitting a null import map entry. This allows us not to fail on extracting packages that might load fine otherwise (albeit with information loss)
             // Log the warning regardless though because the information is lost
             if !builder.has_failed_import_map_entries {
@@ -1297,13 +1311,7 @@ fn finalize_asset(builder: &mut LegacyAssetBuilder) -> anyhow::Result<()> {
             // We need a new import map entry here, and since it's not referenced by the original package, it can be a package entry, which will become Null again if asset is converted back to zen
             new_import_map.push(create_unknown_package_import_map_entry(builder));
             continue;
-        }
-
-        // Take the current position and increment it by one
-        let existing_import_position = current_legacy_asset_import_index;
-        current_legacy_asset_import_index += 1;
-
-        import_remap_map.insert(existing_import_position, final_import_index);
+        };
         new_import_map.push(builder.legacy_package.imports[existing_import_position].clone());
     }
     builder.legacy_package.imports = new_import_map;
@@ -1488,4 +1496,20 @@ pub fn build_legacy(package_context: &FZenPackageContext, package_id: FPackageId
     // Write the asset to the file
     write_asset(&asset_builder, out_path, file_writer)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use super::place_import_positions;
+    use std::collections::HashMap;
+
+    #[test]
+    fn duplicate_predefined_import_position_is_filled_without_duplicate_mapping() {
+        let original_import_order = HashMap::from([(0, 0), (1, 0)]);
+        let (remap, positions) = place_import_positions(2, &original_import_order, 2);
+
+        assert_eq!(positions, vec![Some(0), Some(1)]);
+        assert_eq!(remap.get(&0), Some(&0));
+        assert_eq!(remap.get(&1), Some(&1));
+    }
 }

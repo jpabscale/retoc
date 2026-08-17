@@ -19,7 +19,7 @@ use crate::{
 use crate::global::get_game_id;
 use crate::global::FF7R2_GAME_ID;
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FIoContainerHeader {
     pub version: EIoContainerHeaderVersion,
     pub container_id: FIoContainerId,
@@ -313,7 +313,7 @@ impl Writeable for EIoContainerHeaderVersion {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct FIoContainerHeaderLocalizedPackage {
     source_package_id: FPackageId,
     source_package_name: FMappedName,
@@ -335,7 +335,7 @@ impl Writeable for FIoContainerHeaderLocalizedPackage {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct FIoContainerHeaderPackageRedirect {
     source_package_id: FPackageId,
     target_package_id: FPackageId,
@@ -360,7 +360,7 @@ impl Writeable for FIoContainerHeaderPackageRedirect {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct FIoContainerHeaderSoftPackageReferences {
     package_ids: Vec<FPackageId>,
     package_indices: Vec<u8>,
@@ -379,7 +379,7 @@ impl Writeable for FIoContainerHeaderSoftPackageReferences {
     }
 }
 
-#[derive(Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 struct FIoContainerHeaderSerialInfo {
     offset: i64,
     size: i64,
@@ -399,7 +399,7 @@ impl Writeable for FIoContainerHeaderSerialInfo {
 }
 
 // Used for UE4.27 package redirects that do not provide a source package name
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct LegacyContainerHeaderPackageRedirect {
     source_package_id: FPackageId,
     target_package_id: FPackageId,
@@ -432,7 +432,7 @@ pub struct StoreEntry {
     pub shader_map_hashes: Vec<FSHAHash>,
 }
 
-#[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 struct StoreEntries(BTreeMap<FPackageId, StoreEntry>);
 impl StoreEntries {
     fn get(&self, package_id: FPackageId) -> Option<StoreEntry> {
@@ -653,7 +653,7 @@ impl FFilePackageStoreEntry {
     }
 }
 
-#[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 struct FCulturePackageMap(BTreeMap<String, Vec<(FPackageId, FPackageId)>>);
 impl Readable for FCulturePackageMap {
     fn de<S: Read>(s: &mut S) -> Result<Self> {

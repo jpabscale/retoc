@@ -17,7 +17,7 @@ use retoc::version::EngineVersion;
 use retoc::zen::{FPackageFileVersion, FZenPackageHeader, VerseScriptCell, get_package_name};
 use retoc::zen_asset_conversion::{self, ConvertedZenAssetBundle};
 use retoc::{
-    AesKey, Config, EIoChunkType, EIoStoreTocVersion, FGuid, FIoChunkId, FIoChunkIdRaw, FPackageId, FSFileReader, FSFileWriter, FSHAHash, FileReaderTrait, FileWriterTrait, NullFileWriter, PackageTestMetadata, PakFileReader, ParallelPakWriter, Toc, UEPath, UEPathBuf, build_verse_cell_store, info,
+    AesKey, Config, EIoChunkType, EIoStoreTocVersion, FGuid, FIoChunkId, FIoChunkIdRaw, FIoContainerId, FPackageId, FSFileReader, FSFileWriter, FSHAHash, FileReaderTrait, FileWriterTrait, NullFileWriter, PackageTestMetadata, PakFileReader, ParallelPakWriter, Toc, UEPath, UEPathBuf, build_verse_cell_store, info, pak_path_to_game_path,
     iostore, manifest, verbose,
 };
 use std::borrow::Cow;
@@ -175,6 +175,11 @@ struct ActionToZen {
     /// Asset file name filter
     #[arg(short, long)]
     filter: Vec<String>,
+
+    /// Optional game store (OS-native path-separated .utoc paths) used to reconstruct the localized package dependencies
+    /// that the game cooker records on Initial-era packages
+    #[arg(long)]
+    game_store: Option<String>,
 
     /// Engine version
     #[arg(long)]
@@ -567,6 +572,7 @@ mod raw {
 
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+    use retoc::container_header::EIoContainerHeaderVersion;
     use retoc::{EIoStoreTocVersion, FIoChunkIdRaw};
 
     #[derive(Serialize, Deserialize)]
@@ -574,6 +580,10 @@ mod raw {
         pub(crate) chunk_paths: HashMap<ChunkId, String>,
         pub(crate) version: EIoStoreTocVersion,
         pub(crate) mount_point: String,
+        #[serde(default)]
+        pub(crate) container_id: Option<u64>,
+        #[serde(default)]
+        pub(crate) container_header_version: Option<EIoContainerHeaderVersion>,
     }
     #[derive(Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub(crate) struct ChunkId(#[serde(serialize_with = "to_hex", deserialize_with = "from_hex")] pub(crate) FIoChunkIdRaw);
@@ -614,7 +624,9 @@ fn action_unpack_raw(args: ActionUnpackRaw, config: Arc<Config>) -> Result<()> {
     let mut manifest = raw::RawIoManifest {
         chunk_paths: Default::default(),
         version: iostore.container_file_version().unwrap(),
-        mount_point: "../../../".to_string(),
+        mount_point: iostore.mount_point(),
+        container_id: Some(iostore.container_id().0),
+        container_header_version: iostore.container_header_version(),
     };
 
     for chunk in iostore.chunks() {
@@ -633,17 +645,65 @@ fn action_unpack_raw(args: ActionUnpackRaw, config: Arc<Config>) -> Result<()> {
 }
 
 fn action_pack_raw(args: ActionPackRaw, _config: Arc<Config>) -> Result<()> {
+    use retoc::container_header::FIoContainerHeader;
+
     let manifest: raw::RawIoManifest = serde_json::from_reader(BufReader::new(fs::File::open(args.input.join("manifest.json"))?))?;
 
-    let mut writer = IoStoreWriter::new(args.utoc, manifest.version, None, manifest.mount_point.into())?;
+    // A raw dump may carry the source container's ContainerHeader chunk (type 0x0a). For a complete
+    // dump, preserve that header so version-specific metadata survives the round-trip. For a subset
+    // dump, create a header with the same version and add only the packages being written.
+    let mut header_chunk: Option<FIoContainerHeader> = None;
+    let mut package_chunks: Vec<(FIoChunkIdRaw, Option<String>, Vec<u8>)> = Vec::new();
     for entry in args.input.join("chunks").read_dir()? {
         let entry = entry?;
         let chunk_id = FIoChunkIdRaw::from_str(entry.file_name().to_string_lossy().as_ref())?;
-        let path = manifest.chunk_paths.get(&chunk_id.into()).map(UEPath::new);
+        let path = manifest.chunk_paths.get(&chunk_id.into()).cloned();
         let data = fs::read(entry.path())?;
-        writer.write_chunk_raw(chunk_id, path, &data)?;
+        let chunk_type = FIoChunkId::from_raw(chunk_id, manifest.version).get_chunk_type();
+        if chunk_type == EIoChunkType::ContainerHeader {
+            // Read the source header so a complete dump can preserve its metadata. Subset repacks
+            // use the parsed header only as the source of StoreEntry records.
+            let header = FIoContainerHeader::deserialize(&mut Cursor::new(data.as_slice()), None)?;
+            header_chunk = Some(header);
+        } else {
+            package_chunks.push((chunk_id, path, data));
+        }
+    }
+
+    let container_id = manifest.container_id.map(FIoContainerId).or_else(|| header_chunk.as_ref().map(|h| h.container_id));
+    let package_ids: cityhasher::HashSet<FPackageId> = package_chunks
+        .iter()
+        .filter_map(|(chunk_id, _, _)| {
+            (FIoChunkId::from_raw(*chunk_id, manifest.version).get_chunk_type() == EIoChunkType::ExportBundleData)
+                .then(|| FIoChunkId::from_raw(*chunk_id, manifest.version).get_package_id())
+        })
+        .collect();
+    let header = header_chunk.clone().map(|source_header| {
+        let preserve_source_header = source_header.package_ids().all(|package_id| package_ids.contains(&package_id)) && source_header.package_ids().count() == package_ids.len();
+        if preserve_source_header {
+            source_header
+        } else {
+            FIoContainerHeader::new(source_header.version, container_id.unwrap_or(source_header.container_id))
+        }
+    });
+    let header = header.or_else(|| manifest.container_header_version.map(|version| FIoContainerHeader::new(version, container_id.unwrap_or_default())));
+    let mut writer = IoStoreWriter::with_container_header(args.utoc.clone(), manifest.version, manifest.mount_point.clone().into(), header)?;
+    for (chunk_id, path, data) in package_chunks {
+        let chunk_type = FIoChunkId::from_raw(chunk_id, manifest.version).get_chunk_type();
+        if chunk_type == EIoChunkType::ExportBundleData {
+            let package_id = FIoChunkId::from_raw(chunk_id, manifest.version).get_package_id();
+            let store_entry = header_chunk.as_ref().and_then(|h| h.get_store_entry(package_id));
+            writer.write_chunk_auto(chunk_id, path.as_deref().map(UEPath::new), &data, store_entry)?;
+        } else {
+            writer.write_chunk_raw(chunk_id, path.as_deref().map(UEPath::new), &data)?;
+        }
     }
     writer.finalize()?;
+
+    // Create the legacy index (necessary for the game to detect and load the container).
+    let pak_path = Path::new(&args.utoc).with_extension("pak");
+    repak::PakBuilder::new().writer(&mut BufWriter::new(fs::File::create(pak_path)?), repak::Version::V11, manifest.mount_point.to_string(), None).write_index()?;
+
     Ok(())
 }
 
@@ -804,6 +864,26 @@ fn action_to_zen(args: ActionToZen, config: Arc<Config>) -> Result<()> {
 
     let input: Box<dyn FileReaderTrait> = if args.input.is_dir() { Box::new(FSFileReader::new(args.input)) } else { Box::new(PakFileReader::new(args.input)?) };
 
+    // Optionally read the game store to reconstruct the localized package dependencies the game cooker records
+    let game_package_names: Option<Arc<std::collections::HashSet<String>>> = if let Some(game_store) = &args.game_store {
+        let game_store_paths = std::env::split_paths(OsStr::new(game_store)).collect::<Vec<_>>();
+        let game_iostore = iostore::open_with_container_paths(&game_store_paths, config.clone())?;
+        let package_names = game_iostore
+            .chunks()
+            .filter(|chunk| chunk.id().get_chunk_type() == EIoChunkType::ExportBundleData)
+            .filter_map(|chunk| chunk.path())
+            .filter_map(|path| {
+                let package_path = path.strip_suffix(".uasset").or_else(|| path.strip_suffix(".umap"))?;
+                let package_path = UEPath::new(package_path).strip_prefix("../../../").ok()?;
+                pak_path_to_game_path(&package_path)
+            })
+            .collect::<std::collections::HashSet<_>>();
+        info!(&Log::new_stdout(false, false), "Loaded {} package paths from game store", package_names.len());
+        Some(Arc::new(package_names))
+    } else {
+        None
+    };
+
     let container_header_version = config.container_header_version_override.unwrap_or(args.version.container_header_version());
 
     let toc_version = config.toc_version_override.unwrap_or(args.version.toc_version());
@@ -900,6 +980,7 @@ fn action_to_zen(args: ActionToZen, config: Arc<Config>) -> Result<()> {
                 needs_asset_import_fixup,
                 script_objects.clone(),
                 Some(script_cell_store.clone()),
+                game_package_names.as_deref(),
                 &log,
             )?;
 

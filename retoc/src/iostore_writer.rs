@@ -23,6 +23,9 @@ pub struct IoStoreWriter {
 
 impl IoStoreWriter {
     pub fn new<P: AsRef<Path>>(toc_path: P, toc_version: EIoStoreTocVersion, container_header_version: Option<EIoContainerHeaderVersion>, mount_point: UEPathBuf) -> Result<Self> {
+        Self::with_container_id(toc_path, toc_version, container_header_version, mount_point, None)
+    }
+    pub fn with_container_id<P: AsRef<Path>>(toc_path: P, toc_version: EIoStoreTocVersion, container_header_version: Option<EIoContainerHeaderVersion>, mount_point: UEPathBuf, container_id: Option<FIoContainerId>) -> Result<Self> {
         let toc_path = toc_path.as_ref().to_path_buf();
         let name = toc_path.file_stem().unwrap().to_string_lossy();
         let toc_stream = BufWriter::new(fs::File::create(&toc_path)?);
@@ -31,7 +34,7 @@ impl IoStoreWriter {
         let mut toc = Toc::new();
         toc.compression_block_size = 0x10000;
         toc.version = toc_version;
-        toc.container_id = FIoContainerId::from_name(&name);
+        toc.container_id = container_id.unwrap_or_else(|| FIoContainerId::from_name(&name));
         toc.directory_index.mount_point = mount_point;
         toc.partition_size = u64::MAX;
 
@@ -45,8 +48,35 @@ impl IoStoreWriter {
             container_header,
         })
     }
+    pub fn with_container_header<P: AsRef<Path>>(toc_path: P, toc_version: EIoStoreTocVersion, mount_point: UEPathBuf, container_header: Option<FIoContainerHeader>) -> Result<Self> {
+        let toc_path = toc_path.as_ref().to_path_buf();
+        let name = toc_path.file_stem().unwrap().to_string_lossy();
+        let toc_stream = BufWriter::new(fs::File::create(&toc_path)?);
+        let cas_stream = BufWriter::new(fs::File::create(toc_path.with_extension("ucas"))?);
+
+        let mut toc = Toc::new();
+        toc.compression_block_size = 0x10000;
+        toc.version = toc_version;
+        toc.container_id = container_header.as_ref().map(|header| header.container_id).unwrap_or_else(|| FIoContainerId::from_name(&name));
+        toc.directory_index.mount_point = mount_point;
+        toc.partition_size = u64::MAX;
+
+        Ok(Self { toc_path, toc_stream, cas_stream, toc, container_header })
+    }
     pub fn write_chunk_raw(&mut self, chunk_id_raw: FIoChunkIdRaw, path: Option<&UEPath>, data: &[u8]) -> Result<()> {
         self.write_chunk(FIoChunkId::from_raw(chunk_id_raw, self.toc.version), path, data)
+    }
+    /// Writes a chunk, and if [store_entry] is provided and the chunk is a package export bundle,
+    /// registers it in the container header so the game can resolve the package. Use for raw
+    /// repacks where the package metadata was carried over from the source container.
+    pub fn write_chunk_auto(&mut self, chunk_id_raw: FIoChunkIdRaw, path: Option<&UEPath>, data: &[u8], store_entry: Option<StoreEntry>) -> Result<()> {
+        let chunk_id = FIoChunkId::from_raw(chunk_id_raw, self.toc.version);
+        if let Some(store_entry) = store_entry {
+            if let Some(header) = self.container_header.as_mut() {
+                header.add_package(FPackageId(chunk_id.get_chunk_id()), store_entry);
+            }
+        }
+        self.write_chunk(chunk_id, path, data)
     }
     pub fn write_chunk(&mut self, chunk_id: FIoChunkId, path: Option<&UEPath>, data: &[u8]) -> Result<()> {
         if let Some(path) = path {
@@ -121,7 +151,10 @@ impl IoStoreWriter {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::Config;
     use fs_err as fs;
+    use crate::iostore::IoStoreTrait;
+    use std::sync::Arc;
 
     #[test]
     fn test_write_container() -> Result<()> {
@@ -131,6 +164,29 @@ mod test {
         let data = fs::read("tests/UE5.3/ScriptObjects.bin")?;
         writer.write_chunk_raw(FIoChunkIdRaw { id: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5] }, Some(UEPath::new("../../../asdf/asdf/dasf/script_objects.bin")), &data)?;
         writer.finalize()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_write_container_preserves_header_version_and_mount_point() -> Result<()> {
+        let output_dir = Path::new("out/raw-header-test");
+        fs::remove_dir_all(output_dir).ok();
+        fs::create_dir_all(output_dir)?;
+
+        let toc_path = output_dir.join("container.utoc");
+        let container_id = FIoContainerId::from_name("container");
+        let header = FIoContainerHeader::new(EIoContainerHeaderVersion::SoftPackageReferencesOffset, container_id);
+        let mut writer = IoStoreWriter::with_container_header(&toc_path, EIoStoreTocVersion::PerfectHashWithOverflow, "../../../".into(), Some(header))?;
+        let package_id = FPackageId::from_name("/Game/Test");
+        let chunk_id = FIoChunkId::from_package_id(package_id, 0, EIoChunkType::ExportBundleData);
+        writer.write_package_chunk(chunk_id, Some(UEPath::new("../../../SB/Content/Test.uasset")), &[1, 2, 3], &StoreEntry::default())?;
+        writer.finalize()?;
+
+        let container = crate::iostore::IoStoreContainer::open(&toc_path, Arc::new(Config::default()))?;
+        assert_eq!(container.container_header_version(), Some(EIoContainerHeaderVersion::SoftPackageReferencesOffset));
+        assert_eq!(container.mount_point(), "../../../");
+        assert_eq!(container.container_id(), container_id);
+        assert!(container.package_store_entry(package_id).is_some());
         Ok(())
     }
 }

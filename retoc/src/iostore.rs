@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use fs_err as fs;
 
 use crate::{
-    Config, EIoChunkType, EIoStoreTocVersion, FIoChunkHash, FIoChunkId, FPackageId, Toc,
+    Config, EIoChunkType, EIoStoreTocVersion, FIoChunkHash, FIoChunkId, FIoContainerId, FPackageId, Toc,
     chunk_id::FIoChunkIdRaw,
     container_header::{EIoContainerHeaderVersion, FIoContainerHeader, StoreEntry},
     file_pool::FilePool,
@@ -111,6 +111,8 @@ fn sort_container_name(full_name: &str) -> (bool, u32, &str) {
 
 pub trait IoStoreTrait: Send + Sync {
     fn container_name(&self) -> &str;
+    fn container_id(&self) -> FIoContainerId;
+    fn mount_point(&self) -> String;
     fn container_file_version(&self) -> Option<EIoStoreTocVersion>;
     fn container_header_version(&self) -> Option<EIoContainerHeaderVersion>;
     fn print_info(&self, depth: usize);
@@ -326,6 +328,12 @@ impl IoStoreTrait for IoStoreBackend {
     fn container_name(&self) -> &str {
         "VIRTUAL"
     }
+    fn container_id(&self) -> FIoContainerId {
+        self.containers.first().map(|x| x.container_id()).unwrap_or_default()
+    }
+    fn mount_point(&self) -> String {
+        self.containers.first().map(|x| x.mount_point()).unwrap_or_default()
+    }
     fn container_file_version(&self) -> Option<EIoStoreTocVersion> {
         self.containers.first().and_then(|x| x.container_file_version())
     }
@@ -434,10 +442,22 @@ impl IoStoreContainer {
     pub fn name(&self) -> &str {
         &self.name
     }
+    pub fn container_id(&self) -> FIoContainerId {
+        self.toc.container_id
+    }
+    pub fn mount_point(&self) -> String {
+        self.toc.directory_index.mount_point.to_string()
+    }
 }
 impl IoStoreTrait for IoStoreContainer {
     fn container_name(&self) -> &str {
         &self.name
+    }
+    fn container_id(&self) -> FIoContainerId {
+        self.toc.container_id
+    }
+    fn mount_point(&self) -> String {
+        self.mount_point()
     }
     fn container_file_version(&self) -> Option<EIoStoreTocVersion> {
         Some(self.toc.version)
